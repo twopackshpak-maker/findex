@@ -1,24 +1,33 @@
-"""Об'єктна модель інвертованого індексу (Mapping) та менеджер контексту open_index."""
+"""Об'єктна модель інвертованого індексу, паралельна збірка (build_partial/merge) та open_index."""
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
+import math
+import multiprocessing
+import os
+import sys
 import time
 import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from typing import Literal, Protocol
 
-from findex.corpus import iter_documents
+from findex.corpus import collect_corpus_paths, iter_documents
 from findex.decorators import timed
 from findex.tokenizer import tokenize
 
 logger = logging.getLogger("findex.index")
+
+ExecutorMode = Literal["serial", "threads", "processes"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +47,28 @@ class Posting:
     doc_id: int
     tf: int
     positions: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PartialIndex:
+    """Частковий індекс для окремого діапазону doc_id, придатний для передачі через pickle."""
+
+    postings: dict[str, list[Posting]]
+    docs: list[DocMeta]
+    has_positions: bool = False
+
+
+class PartialBuilder(Protocol):
+    """Протокол воркера збірки часткового індексу."""
+
+    def __call__(
+        self,
+        paths: Sequence[Path],
+        corpus_root: Path | None = None,
+        *,
+        start_doc_id: int = 0,
+        include_positions: bool = False,
+    ) -> PartialIndex: ...
 
 
 @dataclass(frozen=True)
@@ -194,6 +225,61 @@ class StorageBenchmarkRow:
         return self.peak_memory_bytes / (1024 * 1024)
 
 
+@dataclass(frozen=True, slots=True)
+class BuildProfile:
+    """Детальний профіль збірки індексу (wall/CPU/merge час і піковий RSS батьківського процесу)."""
+
+    index: Index
+    wall_time_sec: float
+    cpu_time_sec: float
+    merge_time_sec: float
+    peak_rss_bytes: int
+
+
+def get_peak_rss_bytes() -> int:
+    """Повертає піковий обсяг фізичної пам'яті (RSS) поточного процесу у байтах."""
+    if sys.platform != "win32":
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(rss if sys.platform == "darwin" else rss * 1024)
+
+    class _ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = _ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+    kernel32 = ctypes.cdll.kernel32
+    psapi = ctypes.cdll.psapi
+
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.restype = ctypes.c_void_p
+
+    get_process_memory_info = psapi.GetProcessMemoryInfo
+    get_process_memory_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_ProcessMemoryCounters),
+        ctypes.c_ulong,
+    ]
+    get_process_memory_info.restype = ctypes.c_bool
+
+    handle = get_current_process()
+    if get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
+        return int(counters.PeakWorkingSetSize)
+    return 0
+
+
 def _extract_title(rel_path: str, text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip().lstrip("#").strip()
@@ -202,22 +288,30 @@ def _extract_title(rel_path: str, text: str) -> str:
     return Path(rel_path).stem
 
 
-@timed
-def build_inverted_index(
-    corpus_dir: Path,
+def build_partial(
+    paths: Sequence[Path],
+    corpus_root: Path | None = None,
     *,
+    start_doc_id: int = 0,
     include_positions: bool = False,
-    on_document: Callable[[int], None] | None = None,
-) -> Index:
-    """Будує об'єкт `Index` одним проходом по лінивому пайплайну корпусу."""
+) -> PartialIndex:
+    """Будує частковий індекс для заданого списку шляхів (функція рівня модуля для spawn)."""
     postings_map: dict[str, list[Posting]] = defaultdict(list)
     docs_meta: list[DocMeta] = []
+    local_offset = 0
 
-    for doc_id, doc in enumerate(iter_documents(corpus_dir)):
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            continue
+
+        doc_id = start_doc_id + local_offset
+        local_offset += 1
+
         if include_positions:
             pos_by_term: dict[str, list[int]] = defaultdict(list)
             doc_len = 0
-            for doc_len, token in enumerate(tokenize(doc.text), start=1):
+            for doc_len, token in enumerate(tokenize(text), start=1):
                 pos_by_term[token].append(doc_len - 1)
 
             for term, pos_list in pos_by_term.items():
@@ -225,36 +319,246 @@ def build_inverted_index(
                     Posting(doc_id=doc_id, tf=len(pos_list), positions=tuple(pos_list))
                 )
         else:
-            tf_counter = Counter(tokenize(doc.text))
+            tf_counter = Counter(tokenize(text))
             doc_len = sum(tf_counter.values())
             for term, tf in tf_counter.items():
                 postings_map[term].append(Posting(doc_id=doc_id, tf=tf))
 
+        rel_path = (
+            path.relative_to(corpus_root).as_posix() if corpus_root is not None else path.name
+        )
         docs_meta.append(
             DocMeta(
                 doc_id=doc_id,
-                rel_path=doc.doc_id,
-                title=_extract_title(doc.doc_id, doc.text),
+                rel_path=rel_path,
+                title=_extract_title(rel_path, text),
                 length=doc_len,
             )
         )
-        if on_document is not None:
-            on_document(doc_id)
 
-    logger.debug(
-        "Побудовано індекс: docs=%d, vocab=%d, postings=%d, positions=%s",
-        len(docs_meta),
-        len(postings_map),
-        sum(len(v) for v in postings_map.values()),
-        include_positions,
-    )
-
-    return Index(
+    return PartialIndex(
         postings=dict(postings_map),
         docs=docs_meta,
         has_positions=include_positions,
-        corpus_root=corpus_dir,
     )
+
+
+def merge(
+    partials: Iterable[PartialIndex],
+    *,
+    corpus_root: Path | None = None,
+) -> Index:
+    """Об'єднує впорядковану послідовність `PartialIndex` у єдиний `Index`."""
+    partial_list = list(partials)
+    if not partial_list:
+        return Index(postings={}, docs=[], has_positions=False, corpus_root=corpus_root)
+
+    has_positions = partial_list[0].has_positions
+    if any(p.has_positions != has_positions for p in partial_list):
+        raise ValueError("Неможливо об'єднати часткові індекси з різним режимом has_positions")
+
+    merged_docs: list[DocMeta] = []
+    merged_postings: dict[str, list[Posting]] = defaultdict(list)
+    id_remap: dict[int, int] = {}
+    needs_remap = False
+
+    for part in partial_list:
+        for doc in part.docs:
+            dense_id = len(merged_docs)
+            if doc.doc_id != dense_id:
+                needs_remap = True
+            id_remap[doc.doc_id] = dense_id
+            merged_docs.append(
+                DocMeta(
+                    doc_id=dense_id,
+                    rel_path=doc.rel_path,
+                    title=doc.title,
+                    length=doc.length,
+                )
+                if doc.doc_id != dense_id
+                else doc
+            )
+
+        if not needs_remap:
+            for term, plist in part.postings.items():
+                merged_postings[term].extend(plist)
+        else:
+            for term, plist in part.postings.items():
+                merged_postings[term].extend(
+                    Posting(
+                        doc_id=id_remap[p.doc_id],
+                        tf=p.tf,
+                        positions=p.positions,
+                    )
+                    for p in plist
+                )
+
+    return Index(
+        postings=dict(merged_postings),
+        docs=merged_docs,
+        has_positions=has_positions,
+        corpus_root=corpus_root,
+    )
+
+
+def _partition_paths(paths: Sequence[Path], workers: int) -> list[tuple[int, list[Path]]]:
+    """Розбиває шляхи на `min(workers, len(paths))` суміжних діапазонів `(start_doc_id, chunk)`."""
+    if not paths:
+        return []
+    num_chunks = min(workers, len(paths))
+    chunk_size = math.ceil(len(paths) / num_chunks)
+    chunks: list[tuple[int, list[Path]]] = []
+    for start in range(0, len(paths), chunk_size):
+        chunks.append((start, list(paths[start : start + chunk_size])))
+    return chunks
+
+
+def _run_chunks(
+    chunks: list[tuple[int, list[Path]]],
+    corpus_dir: Path,
+    *,
+    include_positions: bool,
+    executor: ExecutorMode,
+    on_document: Callable[[int], None] | None,
+    worker_fn: PartialBuilder,
+) -> list[PartialIndex]:
+    if not chunks:
+        return []
+
+    if executor == "serial" or len(chunks) == 1:
+        partials: list[PartialIndex] = []
+        for start_id, chunk_paths in chunks:
+            part = worker_fn(
+                chunk_paths,
+                corpus_dir,
+                start_doc_id=start_id,
+                include_positions=include_positions,
+            )
+            partials.append(part)
+            if on_document is not None:
+                for doc in part.docs:
+                    on_document(doc.doc_id)
+        return partials
+
+    ordered: list[PartialIndex | None] = [None] * len(chunks)
+    pool: ProcessPoolExecutor | ThreadPoolExecutor
+    if executor == "threads":
+        pool = ThreadPoolExecutor(max_workers=len(chunks))
+    else:
+        mp_ctx = multiprocessing.get_context("spawn")
+        pool = ProcessPoolExecutor(max_workers=len(chunks), mp_context=mp_ctx)
+
+    futures_to_idx: dict[Future[PartialIndex], int] = {}
+    try:
+        for idx, (start_id, chunk_paths) in enumerate(chunks):
+            fut = pool.submit(
+                worker_fn,
+                chunk_paths,
+                corpus_dir,
+                start_doc_id=start_id,
+                include_positions=include_positions,
+            )
+            futures_to_idx[fut] = idx
+
+        for fut in as_completed(futures_to_idx):
+            part = fut.result()
+            chunk_idx = futures_to_idx[fut]
+            ordered[chunk_idx] = part
+            if on_document is not None:
+                for doc in part.docs:
+                    on_document(doc.doc_id)
+    except BaseException:
+        for f in futures_to_idx:
+            f.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
+    return [p for p in ordered if p is not None]
+
+
+def build_index_profiled(
+    corpus_dir: Path,
+    *,
+    include_positions: bool = False,
+    workers: int | None = None,
+    executor: ExecutorMode = "serial",
+    on_document: Callable[[int], None] | None = None,
+    worker_fn: PartialBuilder | None = None,
+) -> BuildProfile:
+    """Будує індекс у заданому режимі виконання та повертає заміри wall/CPU/merge часу і RSS."""
+    if executor not in ("serial", "threads", "processes"):
+        raise ValueError(f"Невідомий тип виконавця: {executor!r}")
+
+    effective_workers = (
+        (1 if executor == "serial" else (os.cpu_count() or 1)) if workers is None else workers
+    )
+    if effective_workers < 1:
+        raise ValueError(f"Кількість воркерів має бути >= 1, отримано {effective_workers}")
+
+    t_wall_start = time.perf_counter()
+    t_cpu_start = time.process_time()
+
+    paths = collect_corpus_paths(corpus_dir)
+    chunks = _partition_paths(paths, effective_workers)
+    fn: PartialBuilder = worker_fn if worker_fn is not None else build_partial
+
+    partials = _run_chunks(
+        chunks,
+        corpus_dir,
+        include_positions=include_positions,
+        executor=executor,
+        on_document=on_document,
+        worker_fn=fn,
+    )
+
+    t_merge_start = time.perf_counter()
+    index = merge(partials, corpus_root=corpus_dir)
+    merge_time = time.perf_counter() - t_merge_start
+
+    wall_time = time.perf_counter() - t_wall_start
+    cpu_time = time.process_time() - t_cpu_start
+    peak_rss = get_peak_rss_bytes()
+
+    logger.debug(
+        "Побудовано індекс (%s, workers=%d): docs=%d, vocab=%d, wall=%.3fs, merge=%.3fs",
+        executor,
+        effective_workers,
+        index.num_docs,
+        len(index),
+        wall_time,
+        merge_time,
+    )
+
+    return BuildProfile(
+        index=index,
+        wall_time_sec=wall_time,
+        cpu_time_sec=cpu_time,
+        merge_time_sec=merge_time,
+        peak_rss_bytes=peak_rss,
+    )
+
+
+@timed
+def build_inverted_index(
+    corpus_dir: Path,
+    *,
+    include_positions: bool = False,
+    workers: int | None = None,
+    executor: ExecutorMode = "serial",
+    on_document: Callable[[int], None] | None = None,
+    worker_fn: PartialBuilder | None = None,
+) -> Index:
+    """Будує об'єкт `Index` через `build_partial` та `merge` у режимі serial/threads/processes."""
+    return build_index_profiled(
+        corpus_dir,
+        include_positions=include_positions,
+        workers=workers,
+        executor=executor,
+        on_document=on_document,
+        worker_fn=worker_fn,
+    ).index
 
 
 def benchmark_posting_storage(corpus_dir: Path) -> list[StorageBenchmarkRow]:

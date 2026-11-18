@@ -29,6 +29,7 @@ dev = [
     "hypothesis>=6.112.0",
     "pyright>=1.1.380",
     "ruff>=0.6.0",
+    "matplotlib>=3.9.0",
 ]
 
 [tool.pyright]

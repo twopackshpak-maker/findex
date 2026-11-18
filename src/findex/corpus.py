@@ -18,18 +18,28 @@ class Document:
     text: str
 
 
-def count_corpus_files(
+def collect_corpus_paths(
     root: Path,
     extensions: Iterable[str] = DEFAULT_EXTENSIONS,
-) -> int:
-    """Підраховує кількість файлів корпусу для відображення прогресу індексації."""
+) -> list[Path]:
+    """Повертає відсортований список шляхів до файлів корпусу."""
     if not root.exists():
         raise FileNotFoundError(f"Директорію корпусу не знайдено: {root}")
     if not root.is_dir():
         raise NotADirectoryError(f"Очікувалась директорія, отримано файл: {root}")
 
     normalized_exts = {ext.lower() for ext in extensions}
-    return sum(1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts)
+    return sorted(
+        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts
+    )
+
+
+def count_corpus_files(
+    root: Path,
+    extensions: Iterable[str] = DEFAULT_EXTENSIONS,
+) -> int:
+    """Підраховує кількість файлів корпусу для відображення прогресу індексації."""
+    return len(collect_corpus_paths(root, extensions=extensions))
 
 
 def iter_documents(
@@ -37,17 +47,7 @@ def iter_documents(
     extensions: Iterable[str] = DEFAULT_EXTENSIONS,
 ) -> Iterator[Document]:
     """Ліниво ітерує документи з директорії `root` по одному файлу."""
-    if not root.exists():
-        raise FileNotFoundError(f"Директорію корпусу не знайдено: {root}")
-    if not root.is_dir():
-        raise NotADirectoryError(f"Очікувалась директорія, отримано файл: {root}")
-
-    normalized_exts = {ext.lower() for ext in extensions}
-    paths = sorted(
-        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts
-    )
-
-    for path in paths:
+    for path in collect_corpus_paths(root, extensions=extensions):
         text = path.read_text(encoding="utf-8", errors="replace")
         if not text.strip():
             continue

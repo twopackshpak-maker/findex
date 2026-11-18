@@ -5,7 +5,9 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import sys
+import traceback
 import tracemalloc
 from dataclasses import asdict
 from pathlib import Path
@@ -18,7 +20,12 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 
 from findex.corpus import count_corpus_files
-from findex.index import benchmark_posting_storage, build_inverted_index, open_index
+from findex.index import (
+    ExecutorMode,
+    benchmark_posting_storage,
+    build_index_profiled,
+    open_index,
+)
 from findex.search import ScorerName, make_scorer, search
 from findex.stats import collect_stats_eager, collect_stats_lazy
 from findex.storage import StorageFormat, save_index
@@ -100,6 +107,22 @@ def cmd_index(
         bool,
         typer.Option("--positions", help="Зберігати позиції токенів для фразових запитів."),
     ] = False,
+    workers: Annotated[
+        int | None,
+        typer.Option(
+            "--workers",
+            "-w",
+            min=1,
+            help="Кількість воркерів (типово: os.cpu_count() для parallel або 1 для serial).",
+        ),
+    ] = None,
+    executor: Annotated[
+        ExecutorMode,
+        typer.Option(
+            "--executor",
+            help="Виконавець індексації: serial, threads або processes.",
+        ),
+    ] = "processes",
     benchmark_storage: Annotated[
         bool,
         typer.Option("--benchmark-storage", help="Порівняти 3 варіанти зберігання постінгів."),
@@ -112,6 +135,10 @@ def cmd_index(
         _fail(str(exc))
         return
 
+    effective_workers = (
+        (1 if executor == "serial" else (os.cpu_count() or 1)) if workers is None else workers
+    )
+
     gc.collect()
     tracemalloc.start(1)
 
@@ -123,21 +150,32 @@ def cmd_index(
         console=stderr_console,
         transient=True,
     ) as progress:
-        task_id = progress.add_task("Індексація документів...", total=max(total_files, 1))
+        task_id = progress.add_task(
+            f"Індексація ({executor}, workers={effective_workers})...",
+            total=max(total_files, 1),
+        )
 
         def _on_doc(_doc_id: int) -> None:
             progress.advance(task_id, 1)
 
         try:
-            idx = build_inverted_index(
+            profile = build_index_profiled(
                 corpus_dir,
                 include_positions=positions,
+                workers=effective_workers,
+                executor=executor,
                 on_document=_on_doc,
             )
+            idx = profile.index
             save_index(idx, out, fmt=fmt)
         except (OSError, ValueError) as exc:
             tracemalloc.stop()
             _fail(str(exc))
+            return
+        except Exception as exc:
+            tracemalloc.stop()
+            traceback.print_exc(file=sys.stderr)
+            _fail(f"Помилка воркера під час індексації: {exc}")
             return
 
     _, peak_bytes = tracemalloc.get_traced_memory()
@@ -156,11 +194,16 @@ def cmd_index(
     table.add_column("Параметр", style="bold cyan")
     table.add_column("Значення", justify="right")
     table.add_row("Корпус", str(corpus_dir))
+    table.add_row("Виконавець / Воркери", f"{executor} ({effective_workers})")
     table.add_row("Документів", f"{idx.num_docs:,}")
     table.add_row("Унікальних термів", f"{len(idx):,}")
     table.add_row("Усього постінгів", f"{idx.total_postings:,}")
     table.add_row("Позиції токенів", "так" if idx.has_positions else "ні")
-    table.add_row("Пікова RAM", f"{peak_bytes / (1024 * 1024):.2f} МБ")
+    table.add_row(
+        "Wall / Merge час",
+        f"{profile.wall_time_sec:.3f} с / {profile.merge_time_sec:.3f} с",
+    )
+    table.add_row("Піковий RSS процесу", f"{profile.peak_rss_bytes / (1024 * 1024):.2f} МБ")
     table.add_row("Файл індексу", f"{out} ({file_mb:.2f} МБ, {fmt})")
     stdout_console.print(table)
 
