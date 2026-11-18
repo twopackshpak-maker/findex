@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import gc
+import logging
+import time
+import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
-import gc
-import logging
 from pathlib import Path
-import time
-import tracemalloc
 
 from findex.corpus import iter_documents
 from findex.decorators import timed
@@ -168,7 +168,7 @@ def open_index(
     path: Path | str,
     *,
     corpus_root: Path | None = None,
-) -> Iterator[Index]:
+) -> Generator[Index, None, None]:
     """Менеджер контексту для безпечного відкриття індексу з гарантованим звільненням ресурсів."""
     from findex.storage import load_index
 
@@ -217,9 +217,8 @@ def build_inverted_index(
         if include_positions:
             pos_by_term: dict[str, list[int]] = defaultdict(list)
             doc_len = 0
-            for pos, token in enumerate(tokenize(doc.text)):
-                pos_by_term[token].append(pos)
-                doc_len += 1
+            for doc_len, token in enumerate(tokenize(doc.text), start=1):
+                pos_by_term[token].append(doc_len - 1)
 
             for term, pos_list in pos_by_term.items():
                 postings_map[term].append(
@@ -307,9 +306,7 @@ def benchmark_posting_storage(corpus_dir: Path) -> list[StorageBenchmarkRow]:
     gc.collect()
     tracemalloc.start(1)
     t0 = time.perf_counter()
-    arr_map: dict[str, ArrayPostings] = defaultdict(
-        lambda: ArrayPostings(array("I"), array("I"))
-    )
+    arr_map: dict[str, ArrayPostings] = defaultdict(lambda: ArrayPostings(array("I"), array("I")))
     for doc_id, doc in enumerate(iter_documents(corpus_dir)):
         for term, tf in Counter(tokenize(doc.text)).items():
             bucket = arr_map[term]

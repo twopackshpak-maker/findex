@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import gc
 import json
 import logging
-from pathlib import Path
 import sys
 import tracemalloc
+from dataclasses import asdict
+from pathlib import Path
 from typing import Annotated
 
+import typer
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
-import typer
 
 from findex.corpus import count_corpus_files
 from findex.index import benchmark_posting_storage, build_inverted_index, open_index

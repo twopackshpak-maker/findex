@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from array import array
 import logging
-from pathlib import Path
 import pickle
 import struct
+from array import array
+from pathlib import Path
 from typing import BinaryIO, Literal
 
 from findex.decorators import timed
@@ -43,10 +43,7 @@ def load_index(path: Path, *, corpus_root: Path | None = None) -> Index:
     with path.open("rb") as f:
         magic = f.read(len(BIN_MAGIC))
 
-    if magic == BIN_MAGIC:
-        idx = _load_binary_array(path)
-    else:
-        idx = _load_pickle(path)
+    idx = _load_binary_array(path) if magic == BIN_MAGIC else _load_pickle(path)
 
     if corpus_root is not None:
         idx.corpus_root = corpus_root

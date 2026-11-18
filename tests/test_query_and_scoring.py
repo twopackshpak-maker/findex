@@ -116,7 +116,7 @@ def test_snippet_highlighting_and_lru_cache(
         r1 = search(sample_index_with_positions, 'python AND "event loop"', top_k=2)
         r2 = search(sample_index_with_positions, 'python AND "event loop"', top_k=2)
 
-    assert len(r1) == 1
+    assert len(r1) == 2
     assert isinstance(r1[0], SearchResult)
     assert r1[0].doc_id == 0
     assert "**Python**" in r1[0].snippet

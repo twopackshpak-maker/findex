@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import pytest
 
 from findex.index import Index, build_inverted_index
@@ -36,8 +37,7 @@ def sample_corpus_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (corpus / "04_rare.txt").write_text(
-        "Botany Notes\n"
-        "A rare chrysanthemum flower blooms once in autumn.",
+        "Botany Notes\nA rare chrysanthemum flower blooms once in autumn.",
         encoding="utf-8",
     )
     return corpus

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from findex.index import build_inverted_index
 from findex.search import difference_sorted, intersect_sorted, search_boolean, union_sorted

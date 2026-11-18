@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
 import gc
 import logging
-from pathlib import Path
 import time
 import tracemalloc
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
 
 from findex.corpus import iter_documents
 from findex.tokenizer import tokenize

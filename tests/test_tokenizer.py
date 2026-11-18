@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import types
+from collections.abc import Iterator
 
 import pytest
 
@@ -23,8 +23,14 @@ def test_tokenize_returns_lazy_generator() -> None:
         ("Hello, World!", ["hello", "world"]),
         ("ﬁnance cafe\u0301 Straße", ["finance", "café", "strasse"]),
         ("м'яч м’яч мʼяч don't 'цитата'", ["м'яч", "м'яч", "м'яч", "don't", "цитата"]),
-        ("світло-зелений state-of-the-art --тире--", ["світло-зелений", "state-of-the-art", "тире"]),
-        ("Рік 2026. Пі = 3.14, сума 1,000,000.", ["рік", "2026", "пі", "3.14", "сума", "1,000,000"]),
+        (
+            "світло-зелений state-of-the-art --тире--",
+            ["світло-зелений", "state-of-the-art", "тире"],
+        ),
+        (
+            "Рік 2026. Пі = 3.14, сума 1,000,000.",
+            ["рік", "2026", "пі", "3.14", "сума", "1,000,000"],
+        ),
         ("КИЇВ Україна PYTHON", ["київ", "україна", "python"]),
         ("   \n\t ... --- !!! ", []),
         ("", []),

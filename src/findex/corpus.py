@@ -29,9 +29,7 @@ def count_corpus_files(
         raise NotADirectoryError(f"Очікувалась директорія, отримано файл: {root}")
 
     normalized_exts = {ext.lower() for ext in extensions}
-    return sum(
-        1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts
-    )
+    return sum(1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts)
 
 
 def iter_documents(

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import heapq
+import logging
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-import heapq
-import logging
 from typing import Literal
-import weakref
 
 from findex.decorators import timed
 from findex.index import DocMeta, Index
@@ -74,7 +74,7 @@ def search(
     doc_texts: Mapping[int, str] | None = None,
     highlight_ansi: bool = False,
 ) -> list[SearchResult]:
-    """Виконує ранжований пошук по `Index` з використанням протоколу `Scorer` та `heapq.nlargest`."""
+    """Виконує ранжований пошук по `Index` за протоколом `Scorer` та `heapq.nlargest`."""
     from findex.scoring import build_snippet
 
     active_scorer: Scorer = scorer if scorer is not None else BM25()
@@ -216,10 +216,7 @@ def search_boolean(
 ) -> list[SearchHit]:
     """Boolean-пошук по індексу за допомогою рушія `merge` або `set`."""
     ast = parse_query(query)
-    if engine == "merge":
-        matched_ids = _eval_ast_merge(ast, index)
-    else:
-        matched_ids = sorted(ast.evaluate(index))
+    matched_ids = _eval_ast_merge(ast, index) if engine == "merge" else sorted(ast.evaluate(index))
 
     if not matched_ids:
         return []

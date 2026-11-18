@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import re
 import unicodedata
+from collections.abc import Iterator
 
 APOSTROPHE_RE = re.compile(r"[’ʼ`]")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -77,7 +78,7 @@ def test_cli_index_search_json_and_stats(
         ],
     )
     assert res_json.exit_code == 0, res_json.output
-    parsed = json.loads(res_json.stdout)
+    parsed: Any = json.loads(res_json.stdout)
     assert isinstance(parsed, list)
     assert len(parsed) == 2
     assert {item["rel_path"] for item in parsed} == {"00_python.txt", "03_java.txt"}
