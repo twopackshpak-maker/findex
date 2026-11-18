@@ -13,8 +13,8 @@ from findex.tokenizer import normalize_text, tokenize
 def test_tokenize_returns_lazy_generator() -> None:
     stream: Iterator[str] = tokenize("Перший другий третій")
     assert isinstance(stream, Iterator)
-    assert isinstance(stream, types.GeneratorType)
     assert next(stream) == "перший"
+    assert isinstance(stream, types.GeneratorType)
 
 
 @pytest.mark.parametrize(

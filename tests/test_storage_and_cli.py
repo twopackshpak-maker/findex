@@ -1,11 +1,10 @@
 """Тести серіалізації save/load та CLI через typer.testing.CliRunner."""
 
 from __future__ import annotations
-from typing import Any, cast
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -79,7 +78,7 @@ def test_cli_index_search_json_and_stats(
         ],
     )
     assert res_json.exit_code == 0, res_json.output
-    parsed: Any = json.loads(res_json.stdout)
+    parsed = cast(list[dict[str, Any]], json.loads(res_json.stdout))
     assert isinstance(parsed, list)
     assert len(parsed) == 2
     assert {item["rel_path"] for item in parsed} == {"00_python.txt", "03_java.txt"}
