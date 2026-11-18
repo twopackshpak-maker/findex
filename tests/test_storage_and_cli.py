@@ -1,6 +1,7 @@
 """Тести серіалізації save/load та CLI через typer.testing.CliRunner."""
 
 from __future__ import annotations
+from typing import Any, cast
 
 import json
 from pathlib import Path
