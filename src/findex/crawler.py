@@ -69,11 +69,7 @@ class FetchResult:
 
     @property
     def ok(self) -> bool:
-        return (
-            self.error is None
-            and self.status_code is not None
-            and 200 <= self.status_code < 300
-        )
+        return self.error is None and self.status_code is not None and 200 <= self.status_code < 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,7 +582,9 @@ async def crawl(
                     or not res.content_type
                 )
                 if is_html:
-                    title, visible_text, links = extract_html_content(res.text, base_url=final_canon)
+                    title, visible_text, links = extract_html_content(
+                        res.text, base_url=final_canon
+                    )
                 else:
                     title, visible_text, links = "", res.text, []
 

@@ -180,9 +180,7 @@ class Index(Mapping[str, list[Posting]]):
         if ".jsonl#" in rel_path:
             file_part, line_str = rel_path.rsplit("#", 1)
             jsonl_path = (
-                self.corpus_root
-                if self.corpus_root.is_file()
-                else self.corpus_root / file_part
+                self.corpus_root if self.corpus_root.is_file() else self.corpus_root / file_part
             )
             if jsonl_path.is_file() and line_str.isdigit():
                 target_line = int(line_str)
@@ -360,15 +358,11 @@ def build_partial(
     docs_meta: list[DocMeta] = []
     local_offset = 0
     base_root = (
-        corpus_root.parent
-        if (corpus_root is not None and corpus_root.is_file())
-        else corpus_root
+        corpus_root.parent if (corpus_root is not None and corpus_root.is_file()) else corpus_root
     )
 
     for path in paths:
-        rel_path = (
-            path.relative_to(base_root).as_posix() if base_root is not None else path.name
-        )
+        rel_path = path.relative_to(base_root).as_posix() if base_root is not None else path.name
         if path.suffix.lower() == ".jsonl":
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line_no, raw_line in enumerate(handle, start=1):

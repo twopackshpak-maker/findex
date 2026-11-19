@@ -119,9 +119,9 @@ async def main() -> None:
         wall, pps, errors, rss_mb, logs = await _run_case(conc, conc, out_dir)
         print(f"| {conc} | {conc} | {wall:.3f} | {pps:.2f} | {errors} | {rss_mb:.1f} |")
         if conc == 5:
-            sample_retry_log = [
-                line for line in logs if "page-7" in line or "index.html" in line
-            ][:4]
+            sample_retry_log = [line for line in logs if "page-7" in line or "index.html" in line][
+                :4
+            ]
 
     # Додатковий замір із жорстким per-host=2 при concurrency=20 для порівняння ціни ліміту на хост
     wall_lim, pps_lim, err_lim, rss_lim, _ = await _run_case(20, 2, out_dir)

@@ -34,9 +34,7 @@ def collect_corpus_paths(
             return [root]
         raise NotADirectoryError(f"Очікувалась директорія, отримано файл: {root}")
 
-    return sorted(
-        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts
-    )
+    return sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in normalized_exts)
 
 
 def count_corpus_files(
