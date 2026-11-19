@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import cast
 
+import click
 import httpx
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from findex.cli import app
@@ -249,5 +252,14 @@ def test_cli_crawl_command_help() -> None:
     runner = CliRunner()
     res = runner.invoke(app, ["crawl", "--help"])
     assert res.exit_code == 0
-    assert "--max-pages" in res.stdout
-    assert "--concurrency" in res.stdout
+
+    # Rich formats the help table differently across terminals/OSes. Verify
+    # the actual Click command metadata instead of depending on rendered text.
+    click_app = cast(click.Group, get_command(app))
+    crawl_command = click_app.commands["crawl"]
+    option_names = {
+        option
+        for param in crawl_command.params
+        for option in cast(list[str], getattr(param, "opts", []))
+    }
+    assert {"--max-pages", "--concurrency"} <= option_names
