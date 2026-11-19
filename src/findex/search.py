@@ -1,24 +1,29 @@
-"""Ранжований пошук (BM25 / TF-IDF), @lru_cache на резолвінг запитів та сніпети."""
+"""Ранжований пошук на NumPy (BM25 / TF-IDF + np.argpartition), референс Лаби 3 та RRF."""
 
 from __future__ import annotations
 
 import heapq
 import logging
 import weakref
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
+import numpy as np
+from numpy.typing import NDArray
+
 from findex.decorators import timed
-from findex.index import DocMeta, Index
+from findex.index import DocMeta, Index, Int32Array
 from findex.query import parse_query
-from findex.scoring import BM25, Scorer, SearchResult, TfIdf
+from findex.scoring import BM25, Scorer, SearchResult, TfIdf, VectorizedScorer, build_snippet
 
 logger = logging.getLogger("findex.search")
 
 SearchEngineMode = Literal["merge", "set"]
 ScorerName = Literal["bm25", "tfidf"]
+SearchMode = Literal["lexical", "semantic", "hybrid"]
+Float64Array = NDArray[np.float64]
 
 _INDEX_REGISTRY: dict[int, weakref.ReferenceType[Index]] = {}
 
@@ -64,6 +69,27 @@ def get_query_cache_info() -> tuple[int, int]:
     return (info.hits, info.misses)
 
 
+def _select_topk_indices(
+    doc_ids: Int32Array,
+    scores: Float64Array,
+    top_k: int,
+) -> NDArray[np.intp]:
+    """Відбирає топ-k індексів через `np.argpartition` із детермінованим tie-break як у Лабі 3."""
+    n = int(doc_ids.shape[0])
+    if n == 0 or top_k <= 0:
+        return np.empty(0, dtype=np.intp)
+    if top_k < n:
+        part = np.argpartition(-scores, top_k - 1)[:top_k]
+        min_top_score = float(scores[part].min())
+        cand_mask = scores >= min_top_score
+        cand_idx = part if int(cand_mask.sum()) == top_k else np.flatnonzero(cand_mask)
+    else:
+        cand_idx = np.arange(n, dtype=np.intp)
+
+    order = np.lexsort((-doc_ids[cand_idx], -scores[cand_idx]))[:top_k]
+    return cand_idx[order]
+
+
 @timed
 def search(
     index: Index,
@@ -74,9 +100,7 @@ def search(
     doc_texts: Mapping[int, str] | None = None,
     highlight_ansi: bool = False,
 ) -> list[SearchResult]:
-    """Виконує ранжований пошук по `Index` за протоколом `Scorer` та `heapq.nlargest`."""
-    from findex.scoring import build_snippet
-
+    """Векторизований ранжований пошук на масивах NumPy int32 та `np.argpartition`."""
     active_scorer: Scorer = scorer if scorer is not None else BM25()
     ast = parse_query(query)
     positive_terms = ast.positive_terms()
@@ -91,7 +115,91 @@ def search(
     else:
         logger.info("[cache miss] query=%r (hits=%d, misses=%d)", query, after.hits, after.misses)
 
-    if not matched_doc_ids:
+    if not matched_doc_ids or top_k <= 0:
+        return []
+
+    matched_arr = np.asarray(matched_doc_ids, dtype=np.int32)
+    total_scores = np.zeros(matched_arr.shape[0], dtype=np.float64)
+    num_docs = index.num_docs
+    avgdl = index.avg_doc_length
+    doc_lengths = index.doc_lengths
+
+    if isinstance(active_scorer, VectorizedScorer):
+        for term in dict.fromkeys(positive_terms):
+            arrays = index.get_posting_arrays(term)
+            if arrays is None:
+                continue
+            p_doc_ids, p_tfs = arrays
+            term_scores = active_scorer.score_array(
+                p_doc_ids, p_tfs, doc_lengths, num_docs, avgdl
+            )
+            if p_doc_ids.shape[0] == matched_arr.shape[0] and np.array_equal(
+                p_doc_ids, matched_arr
+            ):
+                total_scores += term_scores
+            else:
+                pos = np.searchsorted(matched_arr, p_doc_ids)
+                valid = pos < matched_arr.shape[0]
+                v_pos = pos[valid]
+                hit = matched_arr[v_pos] == p_doc_ids[valid]
+                total_scores[v_pos[hit]] += term_scores[valid][hit]
+    else:
+        matched_set = set(matched_doc_ids)
+        score_map: dict[int, float] = {doc_id: 0.0 for doc_id in matched_doc_ids}
+        for term in dict.fromkeys(positive_terms):
+            if term not in index:
+                continue
+            for posting in index[term]:
+                if posting.doc_id in matched_set:
+                    score_map[posting.doc_id] += active_scorer.score(term, posting, index)
+        total_scores = np.array([score_map[d] for d in matched_doc_ids], dtype=np.float64)
+
+    chosen = _select_topk_indices(matched_arr, total_scores, top_k)
+
+    final_results: list[SearchResult] = []
+    for idx_pos in chosen.tolist():
+        doc_id = int(matched_arr[idx_pos])
+        score_val = float(total_scores[idx_pos])
+        meta = index.docs[doc_id]
+        raw_text = (
+            doc_texts[doc_id]
+            if doc_texts is not None and doc_id in doc_texts
+            else index.read_doc_text(doc_id)
+        )
+        snippet = (
+            build_snippet(raw_text, positive_terms, window=80, highlight_ansi=highlight_ansi)
+            if raw_text
+            else ""
+        )
+        final_results.append(
+            SearchResult(
+                score=score_val,
+                doc_id=doc_id,
+                rel_path=meta.rel_path,
+                title=meta.title,
+                snippet=snippet,
+            )
+        )
+
+    return final_results
+
+
+def search_scalar(
+    index: Index,
+    query: str,
+    *,
+    scorer: Scorer | None = None,
+    top_k: int = 10,
+    doc_texts: Mapping[int, str] | None = None,
+    highlight_ansi: bool = False,
+) -> list[SearchResult]:
+    """Еталонний об'єктний пошук із Лаби 3 (цикл по `Posting` + `heapq.nlargest`)."""
+    active_scorer: Scorer = scorer if scorer is not None else BM25()
+    ast = parse_query(query)
+    positive_terms = ast.positive_terms()
+    matched_doc_ids = tuple(sorted(ast.evaluate(index)))
+
+    if not matched_doc_ids or top_k <= 0:
         return []
 
     matched_set = set(matched_doc_ids)
@@ -142,6 +250,53 @@ def search(
         )
 
     return final_results
+
+
+def reciprocal_rank_fusion(
+    bm25_results: Sequence[SearchResult],
+    semantic_results: Sequence[SearchResult],
+    *,
+    k_rrf: int = 60,
+    top_k: int = 10,
+) -> list[SearchResult]:
+    """Зливає лексичний (BM25) та семантичний рейтинги через Reciprocal Rank Fusion (RRF)."""
+    if top_k <= 0:
+        return []
+
+    rrf_scores: dict[int, float] = {}
+    best_meta: dict[int, SearchResult] = {}
+
+    for rank, item in enumerate(bm25_results, start=1):
+        rrf_scores[item.doc_id] = rrf_scores.get(item.doc_id, 0.0) + 1.0 / (k_rrf + rank)
+        best_meta[item.doc_id] = item
+
+    for rank, item in enumerate(semantic_results, start=1):
+        rrf_scores[item.doc_id] = rrf_scores.get(item.doc_id, 0.0) + 1.0 / (k_rrf + rank)
+        existing = best_meta.get(item.doc_id)
+        if existing is None or (not existing.snippet and item.snippet):
+            best_meta[item.doc_id] = item
+
+    if not rrf_scores:
+        return []
+
+    doc_ids = np.array(list(rrf_scores.keys()), dtype=np.int32)
+    scores = np.array([rrf_scores[int(d)] for d in doc_ids], dtype=np.float64)
+    chosen = _select_topk_indices(doc_ids, scores, top_k)
+
+    fused: list[SearchResult] = []
+    for idx_pos in chosen.tolist():
+        doc_id = int(doc_ids[idx_pos])
+        ref = best_meta[doc_id]
+        fused.append(
+            SearchResult(
+                score=float(scores[idx_pos]),
+                doc_id=doc_id,
+                rel_path=ref.rel_path,
+                title=ref.title,
+                snippet=ref.snippet,
+            )
+        )
+    return fused
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +392,8 @@ def _eval_ast_merge(node: object, index: Index) -> list[int]:
     from findex.query import And, Not, Or, Phrase, Term
 
     if isinstance(node, Term):
-        return [p.doc_id for p in index.get(node.value, ())]
+        arrays = index.get_posting_arrays(node.value)
+        return arrays[0].tolist() if arrays is not None else []
     if isinstance(node, Phrase):
         return sorted(node.evaluate(index))
     if isinstance(node, And):

@@ -1,4 +1,4 @@
-"""Протокол ранжування Scorer, моделі TfIdf та BM25, SearchResult і побудова сніпетів."""
+"""Протокол ранжування Scorer, векторизовані BM25 та TF-IDF на NumPy і сніпети."""
 
 from __future__ import annotations
 
@@ -8,15 +8,34 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from findex.index import Index, Posting
+import numpy as np
+from numpy.typing import NDArray
+
+from findex.index import Index, Int32Array, Posting
 from findex.tokenizer import APOSTROPHE_RE
+
+Float64Array = NDArray[np.float64]
 
 
 @runtime_checkable
 class Scorer(Protocol):
-    """Протокол функції ранжування терміна в документі (duck typing без наслідування)."""
+    """Протокол функції ранжування терміна в документі."""
 
     def score(self, term: str, posting: Posting, index: Index) -> float: ...
+
+
+@runtime_checkable
+class VectorizedScorer(Protocol):
+    """Протокол векторизованого ранжування масиву постінгів NumPy."""
+
+    def score_array(
+        self,
+        doc_ids: Int32Array,
+        tfs: Int32Array,
+        doc_lengths: Int32Array,
+        num_docs: int,
+        avg_doc_length: float,
+    ) -> Float64Array: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +49,23 @@ class TfIdf:
         doc_len = max(index.docs[posting.doc_id].length, 1)
         tf = posting.tf / doc_len
         idf = math.log((index.num_docs + 1) / (df + 1)) + 1.0
+        return tf * idf
+
+    def score_array(
+        self,
+        doc_ids: Int32Array,
+        tfs: Int32Array,
+        doc_lengths: Int32Array,
+        num_docs: int,
+        avg_doc_length: float = 1.0,
+    ) -> Float64Array:
+        _ = avg_doc_length
+        df = int(doc_ids.shape[0])
+        if df == 0 or num_docs == 0:
+            return np.zeros(doc_ids.shape[0], dtype=np.float64)
+        lengths = np.maximum(doc_lengths[doc_ids], 1).astype(np.float64)
+        tf = tfs.astype(np.float64) / lengths
+        idf = math.log((num_docs + 1) / (df + 1)) + 1.0
         return tf * idf
 
 
@@ -50,6 +86,24 @@ class BM25:
         avgdl = max(index.avg_doc_length, 1.0)
         denom = posting.tf + self.k1 * (1.0 - self.b + self.b * (doc_len / avgdl))
         return idf * ((posting.tf * (self.k1 + 1.0)) / denom)
+
+    def score_array(
+        self,
+        doc_ids: Int32Array,
+        tfs: Int32Array,
+        doc_lengths: Int32Array,
+        num_docs: int,
+        avg_doc_length: float,
+    ) -> Float64Array:
+        df = int(doc_ids.shape[0])
+        if df == 0 or num_docs == 0:
+            return np.zeros(doc_ids.shape[0], dtype=np.float64)
+        idf = math.log(1.0 + (num_docs - df + 0.5) / (df + 0.5))
+        avgdl = max(avg_doc_length, 1.0)
+        tfs_f = tfs.astype(np.float64)
+        dl_f = doc_lengths[doc_ids].astype(np.float64)
+        denom = tfs_f + self.k1 * (1.0 - self.b + self.b * (dl_f / avgdl))
+        return idf * ((tfs_f * (self.k1 + 1.0)) / denom)
 
 
 @dataclass(frozen=True, order=True, slots=True)

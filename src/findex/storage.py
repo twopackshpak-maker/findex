@@ -1,16 +1,18 @@
-"""Серіалізація та десеріалізація інвертованого індексу (binary array та pickle)."""
+"""Бінарна (FIDXBIN1 + NumPy int32) та pickle серіалізація інвертованого індексу."""
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 import struct
-from array import array
 from pathlib import Path
 from typing import BinaryIO, Literal
 
+import numpy as np
+
 from findex.decorators import timed
-from findex.index import DocMeta, Index, Posting
+from findex.index import DocMeta, Index, Int32Array
 
 logger = logging.getLogger("findex.storage")
 
@@ -23,7 +25,7 @@ DOC_HEADER_STRUCT = struct.Struct("<II")
 
 
 def save_index(index: Index, path: Path, fmt: StorageFormat = "bin") -> None:
-    """Зберігає об'єкт `Index` у файл у форматі `bin` (array) або `pickle`."""
+    """Зберігає об'єкт `Index` у файл у форматі `bin` (NumPy/uint32) або `pickle`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "pickle":
         _save_pickle(index, path)
@@ -50,14 +52,91 @@ def load_index(path: Path, *, corpus_root: Path | None = None) -> Index:
     return idx
 
 
+def save_index_memmap(index: Index, directory: Path) -> None:
+    """Зберігає postings у двох пласких масивах `.npy`, придатних для mmap."""
+    directory.mkdir(parents=True, exist_ok=True)
+    offsets: dict[str, tuple[int, int]] = {}
+    cursor = 0
+    for term in index:
+        arrays = index.get_posting_arrays(term)
+        if arrays is None:
+            continue
+        count = int(arrays[0].size)
+        offsets[term] = (cursor, cursor + count)
+        cursor += count
+
+    doc_ids = np.lib.format.open_memmap(
+        directory / "doc_ids.npy", mode="w+", dtype=np.int32, shape=(cursor,)
+    )
+    tfs = np.lib.format.open_memmap(
+        directory / "term_frequencies.npy", mode="w+", dtype=np.int32, shape=(cursor,)
+    )
+    for term, (start, stop) in offsets.items():
+        arrays = index.get_posting_arrays(term)
+        assert arrays is not None
+        doc_ids[start:stop] = arrays[0]
+        tfs[start:stop] = arrays[1]
+    doc_ids.flush()
+    tfs.flush()
+    del doc_ids, tfs
+    lengths = np.lib.format.open_memmap(
+        directory / "doc_lengths.npy", mode="w+", dtype=np.int32, shape=(index.num_docs,)
+    )
+    lengths[:] = index.doc_lengths
+    lengths.flush()
+    del lengths
+
+    metadata = {
+        "has_positions": index.has_positions,
+        "docs": [
+            {"doc_id": d.doc_id, "rel_path": d.rel_path, "title": d.title, "length": d.length}
+            for d in index.docs
+        ],
+        "offsets": offsets,
+        "positions": {
+            term: index.posting_positions[term]
+            for term in offsets
+            if term in index.posting_positions
+        },
+    }
+    (directory / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def load_index_memmap(directory: Path, *, corpus_root: Path | None = None) -> Index:
+    """Відкриває масиви postings у режимі read-only mmap без їх копіювання в RAM."""
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    docs = [DocMeta(**item) for item in metadata["docs"]]
+    doc_ids_all = np.load(directory / "doc_ids.npy", mmap_mode="r")
+    tfs_all = np.load(directory / "term_frequencies.npy", mmap_mode="r")
+    ids_map: dict[str, Int32Array] = {}
+    tfs_map: dict[str, Int32Array] = {}
+    for term, (start, stop) in metadata["offsets"].items():
+        ids_map[term] = doc_ids_all[start:stop]
+        tfs_map[term] = tfs_all[start:stop]
+    positions = {
+        term: tuple(tuple(p) for p in lists)
+        for term, lists in metadata.get("positions", {}).items()
+    }
+    index = Index(
+        postings={},
+        docs=docs,
+        has_positions=metadata["has_positions"],
+        corpus_root=corpus_root,
+        posting_arrays=(ids_map, tfs_map),
+        posting_positions=positions,
+    )
+    index.doc_lengths = np.load(directory / "doc_lengths.npy", mmap_mode="r")
+    return index
+
+
 def _save_pickle(index: Index, path: Path) -> None:
     with path.open("wb") as f:
         pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _load_pickle(path: Path) -> Index:
-    # БЕЗПЕКА: pickle.load() небезпечний для чужих файлів через опкод REDUCE,
-    # який дозволяє виконати довільний код (__reduce__).
     with path.open("rb") as f:
         loaded: object = pickle.load(f)
     if not isinstance(loaded, Index):
@@ -99,20 +178,21 @@ def _save_binary_array(index: Index, path: Path) -> None:
             _write_str(f, doc.rel_path)
             _write_str(f, doc.title)
 
-        for term, plist in index.items():
+        for term in index:
             _write_str(f, term)
-            f.write(U32_STRUCT.pack(len(plist)))
-
-            doc_ids = array("I", (p.doc_id for p in plist))
-            freqs = array("I", (p.tf for p in plist))
-            doc_ids.tofile(f)
-            freqs.tofile(f)
+            arrays = index.get_posting_arrays(term)
+            if arrays is None:
+                f.write(U32_STRUCT.pack(0))
+                continue
+            doc_ids_arr, tfs_arr = arrays
+            f.write(U32_STRUCT.pack(int(doc_ids_arr.shape[0])))
+            f.write(doc_ids_arr.astype("<u4").tobytes())
+            f.write(tfs_arr.astype("<u4").tobytes())
 
             if index.has_positions:
-                flat_positions = array("I")
-                for p in plist:
-                    flat_positions.extend(p.positions)
-                flat_positions.tofile(f)
+                plist = index[term]
+                flat_pos = np.array([pos for p in plist for pos in p.positions], dtype="<u4")
+                f.write(flat_pos.tobytes())
 
 
 def _load_binary_array(path: Path) -> Index:
@@ -134,7 +214,10 @@ def _load_binary_array(path: Path) -> Index:
             title = _read_str(f)
             docs.append(DocMeta(doc_id=doc_id, rel_path=rel_path, title=title, length=length))
 
-        postings: dict[str, list[Posting]] = {}
+        doc_ids_map: dict[str, Int32Array] = {}
+        tfs_map: dict[str, Int32Array] = {}
+        positions_map: dict[str, tuple[tuple[int, ...], ...]] = {}
+
         for _ in range(vocab_size):
             term = _read_str(f)
             count_raw = f.read(U32_STRUCT.size)
@@ -142,26 +225,33 @@ def _load_binary_array(path: Path) -> Index:
                 raise ValueError("Пошкоджений лічильник постінгів")
             (n,) = U32_STRUCT.unpack(count_raw)
 
-            doc_ids: array[int] = array("I")
-            doc_ids.fromfile(f, n)
-            freqs: array[int] = array("I")
-            freqs.fromfile(f, n)
+            raw_ids = f.read(n * 4)
+            raw_freqs = f.read(n * 4)
+            if len(raw_ids) != n * 4 or len(raw_freqs) != n * 4:
+                raise ValueError("Пошкоджений блок постінгів у файлі індексу FIDXBIN1")
+
+            doc_ids_arr = np.frombuffer(raw_ids, dtype="<u4").astype(np.int32)
+            freqs_arr = np.frombuffer(raw_freqs, dtype="<u4").astype(np.int32)
+            doc_ids_map[term] = doc_ids_arr
+            tfs_map[term] = freqs_arr
 
             if has_positions:
-                total_pos = sum(freqs)
-                flat_pos: array[int] = array("I")
-                flat_pos.fromfile(f, total_pos)
-
-                plist: list[Posting] = []
+                total_pos = int(freqs_arr.sum())
+                raw_pos = f.read(total_pos * 4)
+                if len(raw_pos) != total_pos * 4:
+                    raise ValueError("Пошкоджений блок позицій у файлі індексу FIDXBIN1")
+                flat_pos = np.frombuffer(raw_pos, dtype="<u4").tolist()
+                pos_list: list[tuple[int, ...]] = []
                 cursor = 0
-                for d_id, tf in zip(doc_ids, freqs, strict=True):
-                    pos_tuple = tuple(flat_pos[cursor : cursor + tf])
-                    cursor += tf
-                    plist.append(Posting(doc_id=d_id, tf=tf, positions=pos_tuple))
-                postings[term] = plist
-            else:
-                postings[term] = [
-                    Posting(doc_id=d_id, tf=tf) for d_id, tf in zip(doc_ids, freqs, strict=True)
-                ]
+                for tf_val in freqs_arr.tolist():
+                    pos_list.append(tuple(flat_pos[cursor : cursor + tf_val]))
+                    cursor += tf_val
+                positions_map[term] = tuple(pos_list)
 
-    return Index(postings=postings, docs=docs, has_positions=has_positions)
+    return Index(
+        postings={},
+        docs=docs,
+        has_positions=has_positions,
+        posting_arrays=(doc_ids_map, tfs_map),
+        posting_positions=positions_map if has_positions else None,
+    )

@@ -53,7 +53,7 @@ def create_app() -> FastAPI:
         finally:
             engine.close()
 
-    app = FastAPI(title="findex Search API", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="findex Search API", version="1.0.0", lifespan=lifespan)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     def _get_engine(request: Request) -> FindexEngineAdapter:

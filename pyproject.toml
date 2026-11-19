@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.7.0"
+version = "1.0.0"
 description = "Навчальна пошукова система на Python: інвертований індекс, BM25/TF-IDF, типізація та CLI"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "jinja2>=3.1.6",
     "pydantic-settings>=2.16.3",
+    "numpy>=2.5.5",
 ]
 
 [project.scripts]
@@ -36,12 +37,18 @@ dev = [
     "ruff>=0.6.0",
     "matplotlib>=3.9.0",
     "httpx>=0.28.1",
+    "py-spy>=0.4.3",
+    "scalene>=2.4.0",
+    "pytest-benchmark>=5.3.1",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff]
 target-version = "py312"

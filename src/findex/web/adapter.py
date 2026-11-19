@@ -75,15 +75,17 @@ class FindexEngineAdapter:
             return [], 0.0
         mode: ScorerMode = "tfidf" if scorer_name.strip().lower() == "tfidf" else "bm25"
         scorer = make_scorer(mode)
-        raw_results = core_search(
-            self._index, q, scorer=scorer, top_k=top_k, highlight_ansi=False
-        )
+        raw_results = core_search(self._index, q, scorer=scorer, top_k=top_k, highlight_ansi=False)
         hits = [
             SearchHit(
                 doc_id=str(res.doc_id),
                 title=res.title or Path(res.rel_path).name,
                 score=round(float(res.score), 4),
-                snippet=res.snippet or "(Фрагмент тексту недоступний)",
+                snippet=(
+                    res.snippet.replace("**", "")
+                    if res.snippet
+                    else "(Фрагмент тексту недоступний)"
+                ),
                 path=res.rel_path,
             )
             for res in raw_results
@@ -105,7 +107,7 @@ class FindexEngineAdapter:
         if meta is None:
             return None
         text = self._index.read_doc_text(meta.doc_id)
-        if text is None and self.corpus_dir.exists():
+        if not text and self.corpus_dir.exists():
             candidate = self.corpus_dir / meta.rel_path
             if candidate.exists() and candidate.is_file():
                 text = candidate.read_text(encoding="utf-8", errors="replace")

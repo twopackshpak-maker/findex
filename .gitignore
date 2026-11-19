@@ -18,3 +18,6 @@ venv/
 # Corpus data & generated binary indexes
 data/
 *.bin
+.lab8-work/
+.uv-cache/
+.pip-cache/

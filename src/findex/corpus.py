@@ -18,6 +18,8 @@ class Document:
     doc_id: str
     path: Path
     text: str
+    rel_path: str = ""
+    title: str = ""
 
 
 def collect_corpus_paths(
@@ -30,7 +32,7 @@ def collect_corpus_paths(
 
     normalized_exts = {ext.lower() for ext in extensions}
     if root.is_file():
-        if root.suffix.lower() == ".jsonl" and ".jsonl" in normalized_exts:
+        if root.suffix.lower() in normalized_exts:
             return [root]
         raise NotADirectoryError(f"Очікувалась директорія, отримано файл: {root}")
 
@@ -63,7 +65,13 @@ def _iter_jsonl_documents(path: Path, base_id: str) -> Iterator[Document]:
             if not combined:
                 continue
             doc_id = str(record.get("url") or f"{base_id}#{line_no}")
-            yield Document(doc_id=doc_id, path=path, text=combined)
+            yield Document(
+                doc_id=doc_id,
+                path=path,
+                text=combined,
+                rel_path=f"{base_id}::{line_no}",
+                title=title or path.stem,
+            )
 
 
 def iter_documents(
@@ -81,4 +89,10 @@ def iter_documents(
         text = path.read_text(encoding="utf-8", errors="replace")
         if not text.strip():
             continue
-        yield Document(doc_id=rel_id, path=path, text=text)
+        yield Document(
+            doc_id=rel_id,
+            path=path,
+            text=text,
+            rel_path=rel_id,
+            title=path.stem,
+        )
