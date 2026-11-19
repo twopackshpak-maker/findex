@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>findex — Пошук по корпусу</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.75rem; flex-wrap: wrap; gap: 0.75rem; }
+    h1 { margin: 0; font-size: 1.65rem; letter-spacing: -0.02em; }
+    h1 span { color: var(--accent); }
+    .nav-links a { color: var(--muted); text-decoration: none; margin-left: 1rem; font-size: 0.9rem; }
+    .nav-links a:hover { color: var(--accent); }
+    .search-box {
+      display: flex; gap: 0.6rem; background: var(--card); padding: 0.6rem;
+      border-radius: 12px; border: 1px solid var(--border);
+    }
+    input[type="text"] {
+      flex: 1; background: transparent; border: none; color: var(--text);
+      font-size: 1.05rem; padding: 0.5rem 0.75rem; outline: none;
+    }
+    select, button {
+      border-radius: 8px; border: 1px solid var(--border); font-size: 0.95rem;
+    }
+    select { background: var(--bg); color: var(--text); padding: 0 0.75rem; }
+    button {
+      background: var(--accent); color: #0f172a; font-weight: 600;
+      padding: 0.6rem 1.25rem; cursor: pointer; border: none;
+    }
+    button:hover { background: var(--accent-hover); color: #fff; }
+    .meta { margin: 1rem 0 1.25rem; font-size: 0.9rem; color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      padding: 1.1rem 1.25rem; margin-bottom: 0.9rem;
+    }
+    .card-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.4rem; }
+    .card-title { font-weight: 600; font-size: 1.05rem; color: var(--accent); text-decoration: none; }
+    .score {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem;
+      background: rgba(56, 189, 248, 0.12); color: var(--accent); padding: 0.15rem 0.55rem; border-radius: 999px;
+    }
+    .doc-path { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .snippet { font-size: 0.95rem; color: #cbd5e1; }
+    .empty { text-align: center; padding: 3rem 1rem; color: var(--muted); background: var(--card); border-radius: 12px; border: 1px dashed var(--border); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1><span>findex</span> search</h1>
+      <nav class="nav-links">
+        <a href="/docs">OpenAPI Docs</a>
+        <a href="/stats">Stats</a>
+        <a href="/health">Health</a>
+      </nav>
+    </header>
+
+    <form class="search-box" method="get" action="/">
+      <input type="text" name="q" value="{{ query }}" placeholder="Введіть пошуковий запит..." autofocus>
+      <select name="top_k" title="Кількість результатів">
+        {% for k in [5, 10, 20, 50] %}
+        <option value="{{ k }}" {% if top_k == k %}selected{% endif %}>Top {{ k }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Знайти</button>
+    </form>
+
+    <div class="meta">
+      <div>
+        {% if query %}
+          Знайдено результатів: <strong>{{ results|length }}</strong> за <strong>{{ took_ms }} мс</strong>
+        {% else %}
+          Введіть запит для пошуку по індексу
+        {% endif %}
+      </div>
+      <div>
+        Документів у корпусі: <strong>{{ stats.corpus_files }}</strong> · Рушій: <code>{{ stats.engine }}</code>
+      </div>
+    </div>
+
+    {% if query and not results %}
+      <div class="empty">За запитом «{{ query }}» нічого не знайдено.</div>
+    {% endif %}
+
+    {% for item in results %}
+      <article class="card">
+        <div class="card-header">
+          <a class="card-title" href="/api/doc/{{ item.doc_id }}" target="_blank">{{ item.title }}</a>
+          <span class="score">score: {{ item.score }}</span>
+        </div>
+        {% if item.path %}<div class="doc-path">{{ item.path }}</div>{% endif %}
+        <div class="snippet">{{ item.snippet }}</div>
+      </article>
+    {% endfor %}
+  </div>
+</body>
+</html>

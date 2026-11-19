@@ -493,3 +493,43 @@ def cmd_stats(
     for rank, (term, freq) in enumerate(lazy.top_terms, start=1):
         top_table.add_row(str(rank), term, f"{freq:,}")
     stdout_console.print(top_table)
+
+@app.command("serve")
+def serve(
+    host: Annotated[
+        str, typer.Option("--host", help="Адреса прослуховування HTTP-сервера.")
+    ] = "0.0.0.0",
+    port: Annotated[
+        int, typer.Option("--port", "-p", min=1, max=65535, help="Порт HTTP-сервера.")
+    ] = 8000,
+    workers: Annotated[
+        int, typer.Option("--workers", "-w", min=1, max=64, help="Кількість воркерів uvicorn.")
+    ] = 1,
+    index_path: Annotated[
+        Path | None, typer.Option("--index-path", "-i", help="Шлях до файлу індексу.")
+    ] = None,
+    corpus_dir: Annotated[
+        Path | None, typer.Option("--corpus-dir", "-c", help="Директорія корпусу.")
+    ] = None,
+    reload: Annotated[
+        bool, typer.Option("--reload", help="Автоперезапуск під час розробки.")
+    ] = False,
+) -> None:
+    """Запускає HTTP API та веб-інтерфейс findex через uvicorn."""
+    import os
+
+    import uvicorn
+
+    if index_path is not None:
+        os.environ["INDEX_PATH"] = str(index_path)
+    if corpus_dir is not None:
+        os.environ["CORPUS_DIR"] = str(corpus_dir)
+
+    uvicorn.run(
+        "findex.web.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        workers=workers,
+        reload=reload,
+    )

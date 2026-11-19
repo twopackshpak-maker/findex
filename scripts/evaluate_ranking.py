@@ -23,7 +23,9 @@ BENCHMARK_QUERIES: tuple[RelevanceJudgment, ...] = (
     RelevanceJudgment('"natural selection" AND species', "origin_of_species", "Походження видів"),
     RelevanceJudgment('"count dracula" OR transylvania', "dracula", "Дракула"),
     RelevanceJudgment('"victor frankenstein" OR monster', "frankenstein", "Франкенштейн"),
-    RelevanceJudgment('"elizabeth bennet" AND darcy', "pride_and_prejudice", "Гордість і упередження"),
+    RelevanceJudgment(
+        '"elizabeth bennet" AND darcy', "pride_and_prejudice", "Гордість і упередження"
+    ),
     RelevanceJudgment('"edmond dantes" OR "chateau d\'if"', "monte_cristo", "Граф Монте-Крісто"),
     RelevanceJudgment("raskolnikov AND petersburg", "crime_and_punishment", "Злочин і кара"),
     RelevanceJudgment('"jean valjean" AND javert', "les_miserables", "Знедолені"),

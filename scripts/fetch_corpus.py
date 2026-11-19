@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import urllib.request
+from pathlib import Path
 
 GUTENBERG_BOOKS: dict[str, str] = {
     "war_and_peace": "https://www.gutenberg.org/cache/epub/2600/pg2600.txt",
