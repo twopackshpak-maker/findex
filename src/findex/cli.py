@@ -23,7 +23,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 
 from findex.corpus import count_corpus_files
-from findex.crawler import CrawlStats, DEFAULT_USER_AGENT, crawl
+from findex.crawler import DEFAULT_USER_AGENT, CrawlStats, crawl
 from findex.index import (
     ExecutorMode,
     benchmark_posting_storage,

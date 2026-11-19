@@ -108,7 +108,7 @@ class CrawlStats:
 
 
 def canonicalize_url(raw_url: str, base_url: str | None = None) -> str | None:
-    """Канонізує URL: нижній регістр схеми/хоста, без #fragment, єдиний слеш і відсортований query."""
+    """Канонізує URL: нижній регістр схеми/хоста, без #fragment, нормалізований шлях і query."""
     cleaned = raw_url.strip()
     if not cleaned:
         return None
