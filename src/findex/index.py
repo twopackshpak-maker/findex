@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import json
 import logging
 import math
 import multiprocessing
@@ -19,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from findex.corpus import collect_corpus_paths, iter_documents
 from findex.decorators import timed
@@ -174,7 +175,30 @@ class Index(Mapping[str, list[Posting]]):
             return self._doc_text_cache[doc_id]
         if self.corpus_root is None:
             return None
-        file_path = self.corpus_root / self._docs[doc_id].rel_path
+
+        rel_path = self._docs[doc_id].rel_path
+        if ".jsonl#" in rel_path:
+            file_part, line_str = rel_path.rsplit("#", 1)
+            jsonl_path = (
+                self.corpus_root
+                if self.corpus_root.is_file()
+                else self.corpus_root / file_part
+            )
+            if jsonl_path.is_file() and line_str.isdigit():
+                target_line = int(line_str)
+                with jsonl_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for idx, raw in enumerate(handle, start=1):
+                        if idx == target_line:
+                            raw_obj: Any = json.loads(raw)
+                            if isinstance(raw_obj, dict):
+                                rec = cast(dict[str, Any], raw_obj)
+                                text = str(rec.get("text", ""))
+                                self._doc_text_cache[doc_id] = text
+                                return text
+                            break
+            return None
+
+        file_path = self.corpus_root / rel_path
         if not file_path.is_file():
             return None
         text = file_path.read_text(encoding="utf-8", errors="replace")
@@ -288,6 +312,42 @@ def _extract_title(rel_path: str, text: str) -> str:
     return Path(rel_path).stem
 
 
+def _index_single_text(
+    text: str,
+    *,
+    doc_id: int,
+    rel_path: str,
+    title: str,
+    include_positions: bool,
+    postings_map: dict[str, list[Posting]],
+    docs_meta: list[DocMeta],
+) -> None:
+    if include_positions:
+        pos_by_term: dict[str, list[int]] = defaultdict(list)
+        doc_len = 0
+        for doc_len, token in enumerate(tokenize(text), start=1):
+            pos_by_term[token].append(doc_len - 1)
+
+        for term, pos_list in pos_by_term.items():
+            postings_map[term].append(
+                Posting(doc_id=doc_id, tf=len(pos_list), positions=tuple(pos_list))
+            )
+    else:
+        tf_counter = Counter(tokenize(text))
+        doc_len = sum(tf_counter.values())
+        for term, tf in tf_counter.items():
+            postings_map[term].append(Posting(doc_id=doc_id, tf=tf))
+
+    docs_meta.append(
+        DocMeta(
+            doc_id=doc_id,
+            rel_path=rel_path,
+            title=title,
+            length=doc_len,
+        )
+    )
+
+
 def build_partial(
     paths: Sequence[Path],
     corpus_root: Path | None = None,
@@ -299,41 +359,64 @@ def build_partial(
     postings_map: dict[str, list[Posting]] = defaultdict(list)
     docs_meta: list[DocMeta] = []
     local_offset = 0
+    base_root = (
+        corpus_root.parent
+        if (corpus_root is not None and corpus_root.is_file())
+        else corpus_root
+    )
 
     for path in paths:
+        rel_path = (
+            path.relative_to(base_root).as_posix() if base_root is not None else path.name
+        )
+        if path.suffix.lower() == ".jsonl":
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_no, raw_line in enumerate(handle, start=1):
+                    stripped = raw_line.strip()
+                    if not stripped:
+                        continue
+                    raw_obj: Any = json.loads(stripped)
+                    if not isinstance(raw_obj, dict):
+                        continue
+                    record = cast(dict[str, Any], raw_obj)
+                    raw_title = str(record.get("title", "")).strip()
+                    raw_body = str(record.get("text", "")).strip()
+                    combined = (
+                        f"{raw_title}\n{raw_body}".strip()
+                        if raw_title and raw_title not in raw_body
+                        else (raw_body or raw_title)
+                    )
+                    if not combined:
+                        continue
+                    doc_id = start_doc_id + local_offset
+                    local_offset += 1
+                    fallback_title = str(record.get("url", rel_path))
+                    display_title = (raw_title or fallback_title)[:100]
+                    _index_single_text(
+                        combined,
+                        doc_id=doc_id,
+                        rel_path=f"{rel_path}#{line_no}",
+                        title=display_title,
+                        include_positions=include_positions,
+                        postings_map=postings_map,
+                        docs_meta=docs_meta,
+                    )
+            continue
+
         text = path.read_text(encoding="utf-8", errors="replace")
         if not text.strip():
             continue
 
         doc_id = start_doc_id + local_offset
         local_offset += 1
-
-        if include_positions:
-            pos_by_term: dict[str, list[int]] = defaultdict(list)
-            doc_len = 0
-            for doc_len, token in enumerate(tokenize(text), start=1):
-                pos_by_term[token].append(doc_len - 1)
-
-            for term, pos_list in pos_by_term.items():
-                postings_map[term].append(
-                    Posting(doc_id=doc_id, tf=len(pos_list), positions=tuple(pos_list))
-                )
-        else:
-            tf_counter = Counter(tokenize(text))
-            doc_len = sum(tf_counter.values())
-            for term, tf in tf_counter.items():
-                postings_map[term].append(Posting(doc_id=doc_id, tf=tf))
-
-        rel_path = (
-            path.relative_to(corpus_root).as_posix() if corpus_root is not None else path.name
-        )
-        docs_meta.append(
-            DocMeta(
-                doc_id=doc_id,
-                rel_path=rel_path,
-                title=_extract_title(rel_path, text),
-                length=doc_len,
-            )
+        _index_single_text(
+            text,
+            doc_id=doc_id,
+            rel_path=rel_path,
+            title=_extract_title(rel_path, text),
+            include_positions=include_positions,
+            postings_map=postings_map,
+            docs_meta=docs_meta,
         )
 
     return PartialIndex(

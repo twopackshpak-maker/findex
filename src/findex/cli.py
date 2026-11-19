@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import logging
 import os
 import sys
+import time
 import traceback
 import tracemalloc
 from dataclasses import asdict
@@ -15,15 +17,18 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
 from findex.corpus import count_corpus_files
+from findex.crawler import CrawlStats, DEFAULT_USER_AGENT, crawl
 from findex.index import (
     ExecutorMode,
     benchmark_posting_storage,
     build_index_profiled,
+    get_peak_rss_bytes,
     open_index,
 )
 from findex.search import ScorerName, make_scorer, search
@@ -89,11 +94,141 @@ def main_callback(
     _configure_logging(verbose)
 
 
+@app.command("crawl")
+def cmd_crawl(
+    start_url: Annotated[
+        str,
+        typer.Argument(help="Початковий URL для обходу (напр. https://docs.python.org/3/)."),
+    ],
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Шлях до вихідного JSONL-файлу."),
+    ] = Path("data/crawled/pages.jsonl"),
+    log_path: Annotated[
+        Path,
+        typer.Option("--log", help="Шлях до файлу журналу статусів URL."),
+    ] = Path("crawl.log"),
+    max_pages: Annotated[
+        int,
+        typer.Option("--max-pages", "-n", min=1, help="Максимальна кількість сторінок."),
+    ] = 50,
+    concurrency: Annotated[
+        int,
+        typer.Option("--concurrency", "-c", min=1, help="Загальна кількість одночасних запитів."),
+    ] = 5,
+    per_host: Annotated[
+        int,
+        typer.Option("--per-host", min=1, help="Ліміт одночасних запитів до одного хоста."),
+    ] = 2,
+    delay: Annotated[
+        float,
+        typer.Option("--delay", min=0.0, help="Мінімальна пауза (с) між запитами до одного хоста."),
+    ] = 0.05,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=0.1, help="Таймаут одного HTTP-запиту (с)."),
+    ] = 10.0,
+    allow_external: Annotated[
+        bool,
+        typer.Option("--allow-external", help="Дозволити перехід на зовнішні домени."),
+    ] = False,
+    ignore_robots: Annotated[
+        bool,
+        typer.Option("--ignore-robots", help="Ігнорувати robots.txt (лише для локальних тестів)."),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", help="Увімкнути debug-режим циклу подій asyncio."),
+    ] = False,
+) -> None:
+    """Асинхронно обходить веб-сторінки та потоково зберігає їх у JSONL."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    stats = CrawlStats()
+
+    def _render_live_table() -> Table:
+        tbl = Table(title=f"Краулер findex (concurrency={concurrency}, max={max_pages})")
+        tbl.add_column("Метрика", style="bold cyan")
+        tbl.add_column("Значення", justify="right")
+        tbl.add_row("Зібрано сторінок", f"{stats.collected} / {max_pages}")
+        tbl.add_row("Сторінок / сек", f"{stats.pages_per_sec:.2f}")
+        tbl.add_row("Активні запити (in-flight)", str(stats.in_flight))
+        tbl.add_row("Помилки", f"[red]{stats.errors}[/red]" if stats.errors else "0")
+        tbl.add_row("Глибина черги", str(stats.queue_depth))
+        tbl.add_row("Повторів (retries)", str(stats.retries))
+        return tbl
+
+    async def _run_crawl() -> float:
+        if debug:
+            loop = asyncio.get_running_loop()
+            loop.slow_callback_duration = 0.1
+
+        t0 = time.perf_counter()
+        with (
+            out.open("w", encoding="utf-8", buffering=1) as jsonl_file,
+            log_path.open("w", encoding="utf-8", buffering=1) as log_file,
+            Live(_render_live_table(), console=stderr_console, refresh_per_second=10) as live,
+        ):
+
+            def _write_log(entry: str) -> None:
+                log_file.write(f"{entry}\n")
+                live.update(_render_live_table())
+
+            async for page in crawl(
+                start_url,
+                max_pages=max_pages,
+                concurrency=concurrency,
+                per_host_concurrency=per_host,
+                min_host_delay=delay,
+                timeout_sec=timeout,
+                same_host_only=not allow_external,
+                respect_robots=not ignore_robots,
+                user_agent=DEFAULT_USER_AGENT,
+                stats=stats,
+                log_callback=_write_log,
+            ):
+                record = {
+                    "doc_id": page.final_url,
+                    "url": page.final_url,
+                    "title": page.title,
+                    "text": page.text,
+                    "status": page.status_code,
+                    "bytes": page.bytes_received,
+                    "elapsed_sec": round(page.elapsed_sec, 4),
+                    "fetched_at": page.fetched_at,
+                }
+                jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                live.update(_render_live_table())
+
+        return time.perf_counter() - t0
+
+    try:
+        wall_sec = asyncio.run(_run_crawl(), debug=debug)
+    except ValueError as exc:
+        _fail(str(exc))
+        return
+
+    peak_rss_mb = get_peak_rss_bytes() / (1024 * 1024)
+    summary = Table(title="Звіт асинхронного краулера findex")
+    summary.add_column("Параметр", style="bold cyan")
+    summary.add_column("Значення", justify="right")
+    summary.add_row("Стартовий URL", start_url)
+    summary.add_row("Concurrency / Per-host", f"{concurrency} / {per_host}")
+    summary.add_row("Зібрано сторінок", str(stats.collected))
+    summary.add_row("Час роботи (wall)", f"{wall_sec:.3f} с")
+    summary.add_row("Швидкість", f"{stats.collected / max(wall_sec, 1e-6):.2f} стор./с")
+    summary.add_row("Помилки / Повтори", f"{stats.errors} / {stats.retries}")
+    summary.add_row("Пік RSS", f"{peak_rss_mb:.2f} МБ")
+    summary.add_row("JSONL / Лог", f"{out} | {log_path}")
+    stdout_console.print(summary)
+
+
 @app.command("index")
 def cmd_index(
     corpus_dir: Annotated[
         Path,
-        typer.Argument(help="Шлях до директорії з корпусом текстів (напр. data/corpus)."),
+        typer.Argument(help="Шлях до директорії з корпусом текстів або JSONL-файлу."),
     ],
     out: Annotated[
         Path,
